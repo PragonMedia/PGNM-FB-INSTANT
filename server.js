@@ -4,7 +4,7 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 const requestLogger = require("./middleware/logger");
-const facebookWebhookRoutes = require("./routes/facebookWebhook");
+const leadsRoutes = require("./routes/leads");
 const { logError, logInfo } = require("./utils/logger");
 
 const app = express();
@@ -23,28 +23,28 @@ app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    facebook_configured: Boolean(
-      process.env.FACEBOOK_VERIFY_TOKEN && process.env.FACEBOOK_PAGE_ACCESS_TOKEN
-    ),
-    partner_configured: Boolean(process.env.PARTNER_API_URL),
+    inbound_auth_enabled: Boolean(process.env.INBOUND_API_KEY),
+    lead_endpoint: "/api/leads",
   });
 });
 
-app.use("/webhook/facebook", facebookWebhookRoutes);
+app.use("/api/leads", leadsRoutes);
 
 app.use((err, req, res, next) => {
   logError("UNHANDLED_ERROR", {
     message: err.message,
     stack: err.stack,
   });
-  res.sendStatus(500);
+  res.status(500).json({
+    accepted: false,
+    reason: "internal_error",
+  });
 });
 
 app.listen(port, () => {
-  logInfo("Facebook Lead Webhook server started", {
+  logInfo("Lead intake server started", {
     port,
-    graph_version: process.env.FACEBOOK_GRAPH_VERSION || "v25.0",
-    signature_verification: Boolean(process.env.FACEBOOK_APP_SECRET) &&
-      String(process.env.FACEBOOK_SKIP_SIGNATURE || "false").toLowerCase() !== "true",
+    endpoint: "/api/leads",
+    auth_enabled: Boolean(process.env.INBOUND_API_KEY),
   });
 });

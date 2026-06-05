@@ -1,198 +1,185 @@
-# Facebook Instant Form Lead Webhook
+# PGNM Lead Intake API
 
-Node.js/Express server that receives Facebook Lead Ads (Instant Form) webhook notifications, fetches full lead data from Meta Graph API, and forwards normalized leads to a partner API.
+Express API that receives Facebook Lead Ads data forwarded from **Zapier** and prepares it for downstream buyer delivery.
+
+## Flow
+
+```text
+Facebook Instant Form
+        ↓
+Zapier (Facebook Lead Ads → New Lead)
+        ↓
+POST https://your-domain.com/api/leads
+        ↓
+This server (normalize, log, process)
+        ↓
+VICIdial buyer (add_lead)
+```
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# Fill in Facebook credentials (see Meta setup below)
 npm install
 npm start
 ```
 
-Health check: `GET http://localhost:3000/health`
+Health check:
 
-Webhook endpoint: `https://your-domain.com/webhook/facebook`
-
-Local testing with ngrok:
-
-```bash
-ngrok http 3000
-# Use https://xxxx.ngrok.io/webhook/facebook as Callback URL in Meta App Dashboard
+```text
+GET http://localhost:3000/health
 ```
 
-Run automated webhook tests (verification + signed POST):
+Lead intake endpoint:
 
-```bash
-npm run test:webhook
+```text
+POST http://localhost:3000/api/leads?channel=fb
 ```
+
+## Channel tracking (`?channel=`)
+
+Hardcode a different URL per Zap (Page / source). The `channel` query param is stored on every lead and passed through to buyer forwarding.
+
+| Source | Zapier webhook URL |
+|--------|-------------------|
+| Facebook | `https://your-domain.com/api/leads?channel=fb` |
+| Google | `https://your-domain.com/api/leads?channel=gg` |
+| Other | `https://your-domain.com/api/leads?channel=your_code` |
+
+Rules: lowercase letters, numbers, `_` and `-` only (max 32 chars). Invalid values return `400`.
+
+The normalized lead object includes `channel` alongside `form_id`, `page_id`, etc.
+
+## Zapier setup
+
+1. **Trigger:** Facebook Lead Ads → New Lead
+2. **Page:** pick your Page
+3. **Form:** All Forms (recommended)
+4. **Action:** Webhooks by Zapier → POST
+5. **URL:** `https://your-domain.com/api/leads?channel=fb` (change per Zap/source)
+6. **Payload type:** JSON
+7. **Data:** map fields, for example:
+
+| JSON key | Zapier field |
+|----------|--------------|
+| `lead_id` | Lead ID (if available) |
+| `first_name` | First Name (if separate) |
+| `last_name` | Last Name (if separate) |
+| `full_name` | Full Name (split into first/last if names not separate) |
+| `phone_number` | Phone Number |
+| `page_id` | Page ID |
+| `page_name` | Page Name |
+| `form_id` | Form ID |
+| `form_name` | Form Name |
+| `ad_id` | Ad ID |
+| `ad_name` | Ad Name |
+| `created_time` | Created Time |
+| `source` | typed value `zapier` |
+
+8. **Auth (optional):** if `INBOUND_API_KEY` is set in `.env`, add header:
+   - `Authorization: Bearer YOUR_KEY`, or
+   - `X-API-Key: YOUR_KEY`
+
+Duplicate one Zap per Facebook Page, all posting to the same `/api/leads` URL.
 
 ## Environment variables
 
 | Variable | Required | Description |
-|---|---|---|
+|----------|----------|-------------|
 | `PORT` | No | Server port (default `3000`) |
-| `FACEBOOK_APP_ID` | Yes | Meta Developer App ID |
-| `FACEBOOK_APP_SECRET` | Yes | Used for webhook signature verification |
-| `FACEBOOK_VERIFY_TOKEN` | Yes | Custom string for webhook subscription verification |
-| `FACEBOOK_PAGE_ACCESS_TOKEN` | Yes | Long-lived Page token with `leads_retrieval` |
-| `FACEBOOK_GRAPH_VERSION` | No | Graph API version (default `v25.0`) |
-| `FACEBOOK_SKIP_SIGNATURE` | No | Set `true` for local dev without signature (default `false`) |
-| `PARTNER_API_URL` | No | Downstream API URL (leads logged if unset) |
-| `PARTNER_API_KEY` | No | Bearer token for partner API |
-| `PARTNER_API_TIMEOUT_MS` | No | Partner request timeout (default `10000`) |
-| `PARTNER_API_MAX_RETRIES` | No | Retries on 5xx/429/network errors (default `2`) |
+| `INBOUND_API_KEY` | No | Protect `/api/leads` with API key auth |
+| `BUYER_ENABLED` | No | Set `false` to disable forwarding (default `true`) |
+| `BUYER_API_URL` | No | VICIdial endpoint (has sensible default) |
+| `BUYER_API_USER` | Yes* | VICIdial API user (`user` param) |
+| `BUYER_API_PASS` | Yes* | VICIdial API password (`pass` param) |
+| `BUYER_CAMPAIGN_ID` | No | Campaign (default `MealsINB`) |
+| `BUYER_SOURCE` | No | Lead source tag (default `KR`) |
 
----
+\* Required for buyer forwarding to run.
 
-## Meta setup (from scratch)
+## Buyer forwarding (VICIdial)
 
-Complete these steps **before** expecting real leads.
+When `BUYER_API_USER` and `BUYER_API_PASS` are set, each lead is POSTed as **form-urlencoded** to VICIdial `add_lead`:
 
-### 1. Prerequisites
+| Field | Value |
+|-------|-------|
+| `function` | `add_lead` |
+| `user` / `pass` | from `.env` |
+| `source` | `BUYER_SOURCE` (default `KR`) |
+| `campaign_id` | `BUYER_CAMPAIGN_ID` |
+| `list_id` | from `?channel=` — `fb`→`222`, `gg`→`223` |
+| `phone_number` | 10-digit US (normalized from FB) |
+| `first_name` / `last_name` | from FB name (split if needed) |
+| `add_to_hopper`, `dnc_check`, etc. | fixed dialer flags |
 
-- A **Facebook Page** for your ads
-- **Meta Business Manager** with admin access to that Page
-- A public **HTTPS** URL for your webhook (ngrok for dev; VPS/Railway/Render for prod)
+No `state`, `postal_code`, or `email` sent.
 
-### 2. Create a Meta Developer App
+- Invalid/missing lead data → logged, **not** sent to buyer.
+- Unmapped `channel` → logged, not sent.
+- VICIdial errors → logged in PM2 (`BUYER_FORWARD_FAILED`).
 
-1. Go to [developers.facebook.com](https://developers.facebook.com) → **Create App** → type **Business**
-2. Add products:
-   - **Webhooks**
-   - **Facebook Login** (required for Lead Ads CRM integration)
-3. Copy **App ID** and **App Secret** into `.env`
+## API response
 
-### 3. Required permissions
-
-Request these when generating tokens:
-
-| Permission | Purpose |
-|---|---|
-| `leads_retrieval` | Fetch lead field values (required) |
-| `pages_manage_metadata` | Subscribe app to Page webhooks |
-| `pages_read_engagement` | Page access |
-| `pages_show_list` | List/connect Pages |
-| `ads_management` | Ad-level metadata |
-| `pages_manage_ads` | Full ad-level lead data |
-
-For production with real ad leads from non-admins, submit **App Review** for `leads_retrieval`.
-
-### 4. Generate a long-lived Page Access Token
-
-1. Open [Graph API Explorer](https://developers.facebook.com/tools/explorer)
-2. Select your app → **Get User Access Token** with permissions above
-3. **Get Token** → select your Page → copy Page access token
-4. Extend to long-lived token and save as `FACEBOOK_PAGE_ACCESS_TOKEN`
-
-### 5. Configure webhook in App Dashboard
-
-In **Webhooks**:
-
-- **Callback URL:** `https://your-domain.com/webhook/facebook`
-- **Verify Token:** same value as `FACEBOOK_VERIFY_TOKEN` in `.env`
-- **Object:** `Page`
-- **Field:** `leadgen`
-
-Meta sends a GET verification request. This server responds with plain-text `hub.challenge` (not JSON).
-
-### 6. Install app on your Page
-
-Webhook notifications only fire when the Page has installed your app:
-
-```bash
-curl -X POST "https://graph.facebook.com/v25.0/{PAGE_ID}/subscribed_apps?subscribed_fields=leadgen&access_token={PAGE_ACCESS_TOKEN}"
-```
-
-Expected: `{"success": true}`
-
-Verify:
-
-```bash
-curl "https://graph.facebook.com/v25.0/{PAGE_ID}/subscribed_apps?access_token={PAGE_ACCESS_TOKEN}"
-```
-
-### 7. Grant Leads Access (critical)
-
-Meta treats custom webhook apps as CRM integrations. Without Leads Access you may see **Error 103: CRM access has been revoked**.
-
-In **Meta Business Suite → Settings → Integrations → Lead Access**:
-
-- Assign your Developer App as an approved CRM for the Page, **or**
-- Click **Restore default access**
-
-### 8. Test with a form preview
-
-1. Open your Instant Form in Ads Manager
-2. **Preview form → Create lead**
-3. Check server logs for `FACEBOOK_WEBHOOK_LEADGEN_EVENTS` and `LEAD_RETRIEVED`
-
----
-
-## How it works
-
-1. User submits Instant Form on Facebook
-2. Meta POSTs a `leadgen` notification (IDs only, not PII)
-3. Server verifies `X-Hub-Signature-256`, responds `200` immediately
-4. Server calls `GET /{leadgen_id}` on Graph API for `field_data`
-5. Lead is mapped and forwarded to `PARTNER_API_URL` (if configured)
-
-### Webhook notification shape
+Success:
 
 ```json
 {
-  "object": "page",
-  "entry": [{
-    "changes": [{
-      "field": "leadgen",
-      "value": {
-        "leadgen_id": 123123123123,
-        "page_id": 123123123,
-        "form_id": 12312312312,
-        "ad_id": 12312312312
-      }
-    }]
-  }]
+  "accepted": true,
+  "duplicate": false,
+  "channel": "fb",
+  "lead_id": "123",
+  "processing": {
+    "processed": true,
+    "forwarded": false,
+    "reason": "buyer_not_configured"
+  }
 }
 ```
 
-### Partner payload shape
+Duplicate:
 
 ```json
 {
-  "leadgen_id": "123123123123",
-  "created_time": "2015-02-28T08:49:14+0000",
-  "ad_id": "...",
-  "form_id": "...",
-  "page_id": "...",
-  "full_name": "Joe Example",
-  "email": "joe@example.com",
-  "phone_number": "+15551234567",
-  "fields": { "full_name": "Joe Example", "email": "joe@example.com" },
-  "source": "facebook_lead_ads"
+  "accepted": true,
+  "duplicate": true
 }
 ```
 
-Update `services/partnerApi.js` when partner API docs specify different auth or field mapping.
+## Test locally
 
----
+```bash
+npm start
+npm run test:leads
+npm run test:buyer
+```
 
-## Troubleshooting
+With API key:
 
-| Symptom | Fix |
-|---|---|
-| Webhook verification fails | Check `FACEBOOK_VERIFY_TOKEN`; ensure plain-text challenge response |
-| POST arrives, no lead data | Verify `leads_retrieval` permission and Page token |
-| Error 103 | Grant CRM access in Lead Access Manager |
-| Signature mismatch | Ensure raw body is used; set `FACEBOOK_APP_SECRET` correctly |
-| No webhooks | Run `subscribed_apps` POST to install app on Page |
+```bash
+INBOUND_API_KEY=secret npm run test:leads
+```
 
----
+## Project structure
 
-## References
+```text
+server.js
+routes/leads.js              # POST /api/leads
+middleware/
+  logger.js
+  verifyApiKey.js
+services/
+  leadProcessor.js
+  buyerApi.js                # VICIdial add_lead POST
+utils/
+  leadNormalizer.js
+  buyerPayload.js
+  channelListMap.js          # channel → list_id
+  phoneNormalizer.js         # 10-digit phone
+  processedLeads.js
+  logger.js
+```
 
-- [Webhooks Getting Started](https://developers.facebook.com/docs/graph-api/webhooks/getting-started)
-- [Webhooks for Leadgen](https://developers.facebook.com/docs/graph-api/webhooks/getting-started/webhooks-for-leadgen)
-- [Lead Ads CRM Integration](https://developers.facebook.com/docs/marketing-api/guides/lead-ads/quickstart/webhooks-integration/)
-- [Retrieving Leads](https://developers.facebook.com/docs/marketing-api/guides/lead-ads/retrieving/)
+## Next steps (planned)
+
+- Persistent storage / queue
+- Additional channel → list_id mappings as needed
